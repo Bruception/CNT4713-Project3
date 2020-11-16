@@ -42,6 +42,8 @@ import net.floodlightcontroller.devicemanager.SwitchPort;
 
 import java.util.ArrayList;
 import java.util.Set;
+import java.util.TreeSet;
+import java.util.HashSet;
 
 import net.floodlightcontroller.linkdiscovery.ILinkDiscoveryService;
 import net.floodlightcontroller.linkdiscovery.LinkInfo;
@@ -130,12 +132,36 @@ public class MyRouting implements IOFMessageListener, IFloodlightModule {
 		floodlightProvider.addOFMessageListener(OFType.PACKET_IN, this);
 	}
 
+	private String getNeighborTopology(long switchID, Set<Link> links) {
+		StringBuilder sb = new StringBuilder();
+		sb.append("switch ").append(switchID).append(" neighbors: ");
+		Set<Long> visitedLinks = new HashSet<Long>();
+		Set<Link> sortedLinks = new TreeSet<Link>(links);
+		long src;
+		boolean isFirst = true;
+		for (Link l : sortedLinks) {
+			src = l.getSrc();
+			if (src != switchID && !visitedLinks.contains(src)) {
+				if (!isFirst) {
+					sb.append(", ");
+				}
+				sb.append(src);
+				isFirst = false;
+			}
+		}
+		return sb.toString();
+	}
+
 	@Override
 	public Command receive(IOFSwitch sw, OFMessage msg, FloodlightContext cntx) {
 		// Print the topology if not yet.
 		if (!printedTopo) {
 			System.out.println("*** Print topology");
-			// For each switch, print its neighbor switches.
+			Map<Long, Set<Link>> linkMap = linkProvider.getSwitchLinks();
+			for (Long switchID : linkMap.keySet()) {
+				String neighborTopology = getNeighborTopology(switchID, linkMap.get(switchID));
+				System.out.println(neighborTopology);
+			}
 			printedTopo = true;
 		}
 		// eth is the packet sent by a switch and received by floodlight.
@@ -144,26 +170,28 @@ public class MyRouting implements IOFMessageListener, IFloodlightModule {
 		if (eth.getEtherType() != 0x0800) {
 			return Command.CONTINUE;
 		}
-		else{
-			System.out.println("*** New flow packet");
-			// Parse the incoming packet.
-			OFPacketIn pi = (OFPacketIn)msg;
-			OFMatch match = new OFMatch();
-			match.loadFromPacket(pi.getPacketData(), pi.getInPort());
-			String sourceIP = IPv4.fromIPv4Address(match.getNetworkSource());
-			String destinationIP = IPv4.fromIPv4Address(match.getNetworkDestination());			
-			System.out.println("srcIP: " + sourceIP);
-	        System.out.println("dstIP: " + destinationIP);
-			// Calculate the path using Dijkstra's algorithm.
-			Route route = null;
-			// ...
-			System.out.println("route: " + "1 2 3 ...");			
-			// Write the path into the flow tables of the switches on the path.
-			if (route != null) {
-				installRoute(route.getPath(), match);
-			}
-			return Command.STOP;
+		System.out.println("*** New flow packet");
+		// Parse the incoming packet.
+		OFPacketIn pi = (OFPacketIn)msg;
+		OFMatch match = new OFMatch();
+		match.loadFromPacket(pi.getPacketData(), pi.getInPort());
+		String sourceIP = IPv4.fromIPv4Address(match.getNetworkSource());
+		String destinationIP = IPv4.fromIPv4Address(match.getNetworkDestination());			
+		System.out.println("srcIP: " + sourceIP);
+		System.out.println("dstIP: " + destinationIP);
+		// Calculate the path using Dijkstra's algorithm.
+		Route route = null;
+		// ...
+		System.out.println("route: " + "1 2 3 ...");			
+		// Write the path into the flow tables of the switches on the path.
+		if (route != null) {
+			installRoute(route.getPath(), match);
 		}
+		return Command.STOP;
+	}
+
+	private Route dijkstra() {
+		return null;
 	}
 
 	// Install routing rules on switches. 
