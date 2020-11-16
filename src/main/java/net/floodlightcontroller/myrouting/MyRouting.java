@@ -52,6 +52,7 @@ import net.floodlightcontroller.routing.Route;
 import net.floodlightcontroller.routing.RouteId;
 import net.floodlightcontroller.staticflowentry.IStaticFlowEntryPusherService;
 import net.floodlightcontroller.topology.NodePortTuple;
+import net.floodlightcontroller.core.IListener.Command;
 
 import org.openflow.util.HexString;
 import org.openflow.util.U8;
@@ -130,52 +131,37 @@ public class MyRouting implements IOFMessageListener, IFloodlightModule {
 	}
 
 	@Override
-	public net.floodlightcontroller.core.IListener.Command receive(
-			IOFSwitch sw, OFMessage msg, FloodlightContext cntx) {
-
-
+	public Command receive(IOFSwitch sw, OFMessage msg, FloodlightContext cntx) {
 		// Print the topology if not yet.
 		if (!printedTopo) {
 			System.out.println("*** Print topology");
-
 			// For each switch, print its neighbor switches.
-
 			printedTopo = true;
 		}
-
-
 		// eth is the packet sent by a switch and received by floodlight.
-		Ethernet eth = IFloodlightProviderService.bcStore.get(cntx,
-				IFloodlightProviderService.CONTEXT_PI_PAYLOAD);
-
+		Ethernet eth = IFloodlightProviderService.bcStore.get(cntx, IFloodlightProviderService.CONTEXT_PI_PAYLOAD);
 		// We process only IP packets of type 0x0800.
 		if (eth.getEtherType() != 0x0800) {
 			return Command.CONTINUE;
 		}
 		else{
 			System.out.println("*** New flow packet");
-
 			// Parse the incoming packet.
 			OFPacketIn pi = (OFPacketIn)msg;
 			OFMatch match = new OFMatch();
-		    match.loadFromPacket(pi.getPacketData(), pi.getInPort());	
-			
-			// Obtain source and destination IPs.
-			// ...
-			System.out.println("srcIP: " + "a.b.c.d");
-	        System.out.println("dstIP: " + "a.b.c.d");
-
-
+			match.loadFromPacket(pi.getPacketData(), pi.getInPort());
+			String sourceIP = IPv4.fromIPv4Address(match.getNetworkSource());
+			String destinationIP = IPv4.fromIPv4Address(match.getNetworkDestination());			
+			System.out.println("srcIP: " + sourceIP);
+	        System.out.println("dstIP: " + destinationIP);
 			// Calculate the path using Dijkstra's algorithm.
 			Route route = null;
 			// ...
 			System.out.println("route: " + "1 2 3 ...");			
-
 			// Write the path into the flow tables of the switches on the path.
 			if (route != null) {
 				installRoute(route.getPath(), match);
 			}
-			
 			return Command.STOP;
 		}
 	}
