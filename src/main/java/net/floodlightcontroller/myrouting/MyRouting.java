@@ -53,6 +53,7 @@ import net.floodlightcontroller.routing.Link;
 import net.floodlightcontroller.routing.Route;
 import net.floodlightcontroller.routing.RouteId;
 import net.floodlightcontroller.staticflowentry.IStaticFlowEntryPusherService;
+import net.floodlightcontroller.topology.ITopologyService;
 import net.floodlightcontroller.topology.NodePortTuple;
 import net.floodlightcontroller.core.IListener.Command;
 
@@ -68,9 +69,13 @@ public class MyRouting implements IOFMessageListener, IFloodlightModule {
 	protected static Logger logger;
 	protected IDeviceService deviceProvider;
 	protected ILinkDiscoveryService linkProvider;
+	protected ITopologyService topologyService;
 
 	// protected Map<Long, IOFSwitch> switches;
 	// protected Map<Link, LinkInfo> links;
+	protected Map<Long, List<Edge>> switchNodes = new HashMap<Long, List<Edge>>();
+	protected Map<Long, List<Long>> deviceMap;
+
 	protected Collection<? extends IDevice> devices;
 
 	protected static int uniqueFlow;
@@ -111,6 +116,7 @@ public class MyRouting implements IOFMessageListener, IFloodlightModule {
 		l.add(IFloodlightProviderService.class);
 		l.add(IDeviceService.class);
 		l.add(ILinkDiscoveryService.class);
+		l.add(ITopologyService.class);
 		return l;
 	}
 
@@ -124,7 +130,7 @@ public class MyRouting implements IOFMessageListener, IFloodlightModule {
 		flowPusher = context
 				.getServiceImpl(IStaticFlowEntryPusherService.class);
 		lds = context.getServiceImpl(ILinkDiscoveryService.class);
-
+		topologyService = context.getServiceImpl(ITopologyService.class);
 	}
 
 	@Override
@@ -166,15 +172,24 @@ public class MyRouting implements IOFMessageListener, IFloodlightModule {
 		return edges;
 	}
 
+	private SwitchPort getDeviceAttachmentPoint(SwitchPort[] attachmentPoints) {
+		for (SwitchPort attachmentPoint : attachmentPoints) {
+			Set<Short> ports = topologyService.getPortsWithLinks(attachmentPoint.getSwitchDPID());
+			if (!ports.contains((short)attachmentPoint.getPort())) {
+				return attachmentPoint;
+			}
+		}
+		return null;
+	}
+
 	@Override
 	public Command receive(IOFSwitch sw, OFMessage msg, FloodlightContext cntx) {
 		if (!printedTopo) {
-			Map<Long, List<Edge>> nodes = new HashMap<Long, List<Edge>>();
 			System.out.println("*** Print topology");
 			Map<Long, Set<Link>> linkMap = linkProvider.getSwitchLinks();
 			for (Long switchID : linkMap.keySet()) {
 				List<Edge> switchEdges = getSwitchEdges(switchID, linkMap.get(switchID));
-				nodes.put(switchID, switchEdges);
+				switchNodes.put(switchID, switchEdges);
 				String neighborTopology = getNeighborTopology(switchID, switchEdges);
 				System.out.println(neighborTopology);
 			}
@@ -185,7 +200,10 @@ public class MyRouting implements IOFMessageListener, IFloodlightModule {
 		if (eth.getEtherType() != Ethernet.TYPE_IPv4) {
 			return Command.CONTINUE;
 		}
-		System.out.println(deviceProvider.getAllDevices());
+		devices = deviceProvider.getAllDevices();
+		for (IDevice device : devices) {
+			System.out.println(IPv4.fromIPv4Address(device.getIPv4Addresses()[0]) + " -> " + getDeviceAttachmentPoint(device.getAttachmentPoints()));
+		}
 		System.out.println("*** New flow packet");
 		// Parse the incoming packet.
 		OFPacketIn pi = (OFPacketIn)msg;
@@ -195,8 +213,7 @@ public class MyRouting implements IOFMessageListener, IFloodlightModule {
 		String destinationIP = IPv4.fromIPv4Address(match.getNetworkDestination());			
 		System.out.println("srcIP: " + sourceIP);
 		System.out.println("dstIP: " + destinationIP);
-
-		Route route = dijkstra();
+		Route route = dijkstra(sourceIP, destinationIP);
 		if (route != null) {
 			System.out.println("route: " + "1 2 3 ...");
 			installRoute(route.getPath(), match);
@@ -234,7 +251,7 @@ public class MyRouting implements IOFMessageListener, IFloodlightModule {
 		}
 	}
 
-	private Route dijkstra() {
+	private Route dijkstra(String sourceIP, String destinationIP) {
 		return null;
 	}
 
