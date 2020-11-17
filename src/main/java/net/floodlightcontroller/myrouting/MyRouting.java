@@ -1,9 +1,7 @@
 /*******************
 
 Team members and IDs:
-Name1 ID1
-Name2 ID2
-Name3 ID3
+Bruce Berrios 6116238
 
 Github link:
 https://github.com/xxx/yyy
@@ -19,6 +17,8 @@ import java.util.LinkedList;
 import java.util.List;
 import java.util.Map;
 import java.util.PriorityQueue;
+import java.util.Comparator;
+import java.util.Collections;
 
 import org.openflow.protocol.OFFlowMod;
 import org.openflow.protocol.OFMatch;
@@ -69,8 +69,8 @@ public class MyRouting implements IOFMessageListener, IFloodlightModule {
 	protected IDeviceService deviceProvider;
 	protected ILinkDiscoveryService linkProvider;
 
-	protected Map<Long, IOFSwitch> switches;
-	protected Map<Link, LinkInfo> links;
+	// protected Map<Long, IOFSwitch> switches;
+	// protected Map<Link, LinkInfo> links;
 	protected Collection<? extends IDevice> devices;
 
 	protected static int uniqueFlow;
@@ -132,44 +132,60 @@ public class MyRouting implements IOFMessageListener, IFloodlightModule {
 		floodlightProvider.addOFMessageListener(OFType.PACKET_IN, this);
 	}
 
-	private String getNeighborTopology(long switchID, Set<Link> links) {
+	private String getNeighborTopology(Long switchID, List<Edge> edges) {
 		StringBuilder sb = new StringBuilder();
 		sb.append("switch ").append(switchID).append(" neighbors: ");
-		Set<Long> visitedLinks = new HashSet<Long>();
-		Set<Link> sortedLinks = new TreeSet<Link>(links);
-		long src;
 		boolean isFirst = true;
-		for (Link l : sortedLinks) {
-			src = l.getSrc();
-			if (src != switchID && !visitedLinks.contains(src)) {
-				if (!isFirst) {
-					sb.append(", ");
-				}
-				sb.append(src);
-				isFirst = false;
+		for (Edge e : edges) {
+			if (!isFirst) {
+				sb.append(", ");
 			}
+			sb.append(e.targetID);
+			isFirst = false;
 		}
 		return sb.toString();
 	}
 
+	private List<Edge> getSwitchEdges(long switchID, Set<Link> links) {
+		List<Edge> edges = new ArrayList<Edge>();
+		Set<Long> visitedLinks = new HashSet<Long>();
+		long dstID;
+		for (Link l : links) {
+			dstID = l.getDst();
+			if (dstID != switchID && !visitedLinks.contains(dstID)) {
+				visitedLinks.add(dstID);
+				edges.add(new Edge(switchID, dstID));
+			}
+		}
+		Collections.sort(edges, new Comparator<Edge>() {
+			@Override
+			public int compare(Edge e, Edge e2) {
+				return (int)(e.targetID - e2.targetID);
+			}
+		});
+		return edges;
+	}
+
 	@Override
 	public Command receive(IOFSwitch sw, OFMessage msg, FloodlightContext cntx) {
-		// Print the topology if not yet.
 		if (!printedTopo) {
+			Map<Long, List<Edge>> nodes = new HashMap<Long, List<Edge>>();
 			System.out.println("*** Print topology");
 			Map<Long, Set<Link>> linkMap = linkProvider.getSwitchLinks();
 			for (Long switchID : linkMap.keySet()) {
-				String neighborTopology = getNeighborTopology(switchID, linkMap.get(switchID));
+				List<Edge> switchEdges = getSwitchEdges(switchID, linkMap.get(switchID));
+				nodes.put(switchID, switchEdges);
+				String neighborTopology = getNeighborTopology(switchID, switchEdges);
 				System.out.println(neighborTopology);
 			}
 			printedTopo = true;
 		}
-		// eth is the packet sent by a switch and received by floodlight.
+
 		Ethernet eth = IFloodlightProviderService.bcStore.get(cntx, IFloodlightProviderService.CONTEXT_PI_PAYLOAD);
-		// We process only IP packets of type 0x0800.
-		if (eth.getEtherType() != 0x0800) {
+		if (eth.getEtherType() != Ethernet.TYPE_IPv4) {
 			return Command.CONTINUE;
 		}
+		System.out.println(deviceProvider.getAllDevices());
 		System.out.println("*** New flow packet");
 		// Parse the incoming packet.
 		OFPacketIn pi = (OFPacketIn)msg;
@@ -179,15 +195,43 @@ public class MyRouting implements IOFMessageListener, IFloodlightModule {
 		String destinationIP = IPv4.fromIPv4Address(match.getNetworkDestination());			
 		System.out.println("srcIP: " + sourceIP);
 		System.out.println("dstIP: " + destinationIP);
-		// Calculate the path using Dijkstra's algorithm.
-		Route route = null;
-		// ...
-		System.out.println("route: " + "1 2 3 ...");			
-		// Write the path into the flow tables of the switches on the path.
+
+		Route route = dijkstra();
 		if (route != null) {
+			System.out.println("route: " + "1 2 3 ...");
 			installRoute(route.getPath(), match);
 		}
 		return Command.STOP;
+	}
+
+	private class Edge implements Comparable<Edge> {
+		private long sourceID;
+		private long targetID;
+		private int cost;
+
+		public Edge(long sourceID, long targetID) {
+			this.sourceID = sourceID;
+			this.targetID = targetID;
+			boolean sourceIDIsOdd = sourceID % 2 == 1;
+			boolean targetIDIsOdd = targetID % 2 == 1;
+			if (sourceIDIsOdd && targetIDIsOdd) {
+				cost = 1;
+			} else if (!sourceIDIsOdd && !targetIDIsOdd) {
+				cost = 100;
+			} else {
+				cost = 10;
+			}
+		}
+
+		@Override
+		public int compareTo(Edge e) {
+			return this.cost - e.cost;
+		}
+
+		@Override
+		public String toString() {
+			return "( " + sourceID + " -> " + targetID + ", " + cost + " )";
+		}
 	}
 
 	private Route dijkstra() {
