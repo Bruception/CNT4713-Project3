@@ -42,7 +42,6 @@ import net.floodlightcontroller.devicemanager.SwitchPort;
 
 import java.util.ArrayList;
 import java.util.Set;
-import java.util.TreeSet;
 import java.util.HashSet;
 
 import net.floodlightcontroller.linkdiscovery.ILinkDiscoveryService;
@@ -73,8 +72,9 @@ public class MyRouting implements IOFMessageListener, IFloodlightModule {
 
 	// protected Map<Long, IOFSwitch> switches;
 	// protected Map<Link, LinkInfo> links;
-	protected Map<Long, List<Edge>> switchNodes = new HashMap<Long, List<Edge>>();
-	protected Map<Long, List<Long>> deviceMap;
+	protected Map<Long, SwitchNode> switchNodes = new HashMap<Long, SwitchNode>();
+	protected Map<Long, Set<String>> deviceMap = new HashMap<Long, Set<String>>();
+	protected Map<String, Long> deviceSwitches = new HashMap<String, Long>();
 
 	protected Collection<? extends IDevice> devices;
 
@@ -172,14 +172,17 @@ public class MyRouting implements IOFMessageListener, IFloodlightModule {
 		return edges;
 	}
 
-	private SwitchPort getDeviceAttachmentPoint(SwitchPort[] attachmentPoints) {
+	private long getDeviceSwitchID(SwitchPort[] attachmentPoints) {
+		Set<Short> ports;
+		long switchID;
 		for (SwitchPort attachmentPoint : attachmentPoints) {
-			Set<Short> ports = topologyService.getPortsWithLinks(attachmentPoint.getSwitchDPID());
+			switchID = attachmentPoint.getSwitchDPID();
+			ports = topologyService.getPortsWithLinks(switchID);
 			if (!ports.contains((short)attachmentPoint.getPort())) {
-				return attachmentPoint;
+				return switchID;
 			}
 		}
-		return null;
+		return -1;
 	}
 
 	@Override
@@ -189,7 +192,7 @@ public class MyRouting implements IOFMessageListener, IFloodlightModule {
 			Map<Long, Set<Link>> linkMap = linkProvider.getSwitchLinks();
 			for (Long switchID : linkMap.keySet()) {
 				List<Edge> switchEdges = getSwitchEdges(switchID, linkMap.get(switchID));
-				switchNodes.put(switchID, switchEdges);
+				switchNodes.put(switchID, new SwitchNode(switchID, switchEdges));
 				String neighborTopology = getNeighborTopology(switchID, switchEdges);
 				System.out.println(neighborTopology);
 			}
@@ -202,7 +205,14 @@ public class MyRouting implements IOFMessageListener, IFloodlightModule {
 		}
 		devices = deviceProvider.getAllDevices();
 		for (IDevice device : devices) {
-			System.out.println(IPv4.fromIPv4Address(device.getIPv4Addresses()[0]) + " -> " + getDeviceAttachmentPoint(device.getAttachmentPoints()));
+			long parentSwitchID = getDeviceSwitchID(device.getAttachmentPoints());
+			if (parentSwitchID != -1) {
+				String deviceIP = IPv4.fromIPv4Address(device.getIPv4Addresses()[0]);
+				Set<String> deviceIPs = deviceMap.getOrDefault(parentSwitchID, new HashSet<String>());
+				deviceSwitches.put(deviceIP, parentSwitchID);
+				deviceIPs.add(deviceIP);
+				deviceMap.put(parentSwitchID, deviceIPs);
+			}
 		}
 		System.out.println("*** New flow packet");
 		// Parse the incoming packet.
@@ -215,13 +225,12 @@ public class MyRouting implements IOFMessageListener, IFloodlightModule {
 		System.out.println("dstIP: " + destinationIP);
 		Route route = dijkstra(sourceIP, destinationIP);
 		if (route != null) {
-			System.out.println("route: " + "1 2 3 ...");
 			installRoute(route.getPath(), match);
 		}
 		return Command.STOP;
 	}
 
-	private class Edge implements Comparable<Edge> {
+	private class Edge {
 		private long sourceID;
 		private long targetID;
 		private int cost;
@@ -241,18 +250,87 @@ public class MyRouting implements IOFMessageListener, IFloodlightModule {
 		}
 
 		@Override
-		public int compareTo(Edge e) {
-			return this.cost - e.cost;
-		}
-
-		@Override
 		public String toString() {
 			return "( " + sourceID + " -> " + targetID + ", " + cost + " )";
 		}
 	}
 
+	private class SwitchNode implements Comparable<SwitchNode> {
+		private int cost;
+		private SwitchNode parent;
+		private long id;
+		private List<Edge> edges;
+
+		public SwitchNode(long switchID, List<Edge> edges) {
+			cost = Integer.MAX_VALUE;
+			parent = null;
+			id = switchID;
+			this.edges = edges;
+		}
+
+		@Override
+		public int compareTo(SwitchNode e) {
+			return this.cost - e.cost;
+		}
+
+		public void reset() {
+			cost = Integer.MAX_VALUE;
+			parent = null;
+		}
+	}
+
+	private String getPath(SwitchNode target) {
+		StringBuilder sb = new StringBuilder();
+		while (target != null) {
+			sb.append(' ');
+			sb.append(target.id);
+			target = target.parent;
+		}
+		return sb.reverse().toString();
+	}
+
 	private Route dijkstra(String sourceIP, String destinationIP) {
-		return null;
+		Route route = null;
+		PriorityQueue<SwitchNode> frontier = new PriorityQueue<SwitchNode>();
+		Set<Long> explored = new HashSet<Long>();
+		SwitchNode root = switchNodes.get(deviceSwitches.get(sourceIP));
+		root.cost = 0;
+		frontier.offer(root);
+		SwitchNode current;
+		while (!frontier.isEmpty()) {
+			current = frontier.poll();
+			if (explored.contains(current.id)) {
+				continue;
+			}
+			explored.add(current.id);
+			if (deviceMap.containsKey(current.id)) {
+				Iterator<String> deviceIPIterator = deviceMap.get(current.id).iterator();
+				while (deviceIPIterator.hasNext()) {
+					String deviceIP = deviceIPIterator.next();
+					if (destinationIP.equals(deviceIP)) {
+						System.out.println("route: " + getPath(current));
+						break;
+					}
+				}
+			}
+			for (Edge edge : current.edges) {
+				if (edge.targetID == current.id || explored.contains(edge.targetID)) {
+					continue;
+				}
+				SwitchNode target = switchNodes.get(edge.targetID);
+				int newCost = edge.cost + current.cost;
+				if (newCost < target.cost) {
+					frontier.remove(target);
+					target.cost = newCost;
+					target.parent = current;
+					frontier.offer(target);
+				}
+			}
+		}
+		for (long switchID : switchNodes.keySet()) {
+			switchNodes.get(switchID).reset();
+		}
+		return route;
 	}
 
 	// Install routing rules on switches. 
