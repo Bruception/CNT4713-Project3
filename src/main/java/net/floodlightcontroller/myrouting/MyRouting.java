@@ -4,7 +4,7 @@ Team members and IDs:
 Bruce Berrios 6116238
 
 Github link:
-https://github.com/xxx/yyy
+https://github.com/Bruception/CNT4713-Project3
 
 *******************/
 
@@ -13,7 +13,6 @@ package net.floodlightcontroller.myrouting;
 import java.util.Collection;
 import java.util.HashMap;
 import java.util.Iterator;
-import java.util.LinkedList;
 import java.util.List;
 import java.util.Map;
 import java.util.PriorityQueue;
@@ -45,7 +44,6 @@ import java.util.Set;
 import java.util.HashSet;
 
 import net.floodlightcontroller.linkdiscovery.ILinkDiscoveryService;
-import net.floodlightcontroller.linkdiscovery.LinkInfo;
 import net.floodlightcontroller.packet.Ethernet;
 import net.floodlightcontroller.packet.IPv4;
 import net.floodlightcontroller.routing.Link;
@@ -70,8 +68,6 @@ public class MyRouting implements IOFMessageListener, IFloodlightModule {
 	protected ILinkDiscoveryService linkProvider;
 	protected ITopologyService topologyService;
 
-	// protected Map<Long, IOFSwitch> switches;
-	// protected Map<Link, LinkInfo> links;
 	protected Map<Long, SwitchNode> switchNodes = new HashMap<Long, SwitchNode>();
 	protected Map<Long, Set<String>> deviceMap = new HashMap<Long, Set<String>>();
 	protected Map<String, Long> deviceSwitches = new HashMap<String, Long>();
@@ -160,7 +156,7 @@ public class MyRouting implements IOFMessageListener, IFloodlightModule {
 			dstID = l.getDst();
 			if (dstID != switchID && !visitedLinks.contains(dstID)) {
 				visitedLinks.add(dstID);
-				edges.add(new Edge(switchID, dstID));
+				edges.add(new Edge(switchID, dstID, l.getSrcPort(), l.getDstPort()));
 			}
 		}
 		Collections.sort(edges, new Comparator<Edge>() {
@@ -226,6 +222,8 @@ public class MyRouting implements IOFMessageListener, IFloodlightModule {
 		Route route = dijkstra(sourceIP, destinationIP);
 		if (route != null) {
 			installRoute(route.getPath(), match);
+		} else {
+			System.out.println("route: No route found!");
 		}
 		return Command.STOP;
 	}
@@ -233,11 +231,15 @@ public class MyRouting implements IOFMessageListener, IFloodlightModule {
 	private class Edge {
 		private long sourceID;
 		private long targetID;
+		private short srcPort;
+		private short dstPort;
 		private int cost;
 
-		public Edge(long sourceID, long targetID) {
+		public Edge(long sourceID, long targetID, short srcPort, short dstPort) {
 			this.sourceID = sourceID;
 			this.targetID = targetID;
+			this.srcPort = srcPort;
+			this.dstPort = dstPort;
 			boolean sourceIDIsOdd = sourceID % 2 == 1;
 			boolean targetIDIsOdd = targetID % 2 == 1;
 			if (sourceIDIsOdd && targetIDIsOdd) {
@@ -251,7 +253,7 @@ public class MyRouting implements IOFMessageListener, IFloodlightModule {
 
 		@Override
 		public String toString() {
-			return "( " + sourceID + " -> " + targetID + ", " + cost + " )";
+			return "( (" + sourceID + ", PORT: " + srcPort + ") -> (" + targetID + ", PORT: " + dstPort + ") ," + cost + " )";
 		}
 	}
 
@@ -260,6 +262,7 @@ public class MyRouting implements IOFMessageListener, IFloodlightModule {
 		private SwitchNode parent;
 		private long id;
 		private List<Edge> edges;
+		private Edge edgeFrom;
 
 		public SwitchNode(long switchID, List<Edge> edges) {
 			cost = Integer.MAX_VALUE;
@@ -276,21 +279,43 @@ public class MyRouting implements IOFMessageListener, IFloodlightModule {
 		public void reset() {
 			cost = Integer.MAX_VALUE;
 			parent = null;
+			edgeFrom = null;
 		}
 	}
 
-	private String getPath(SwitchNode target) {
-		StringBuilder sb = new StringBuilder();
+	private List<SwitchNode> getPath(SwitchNode target) {
+		List<SwitchNode> path = new ArrayList<SwitchNode>();
 		while (target != null) {
-			sb.append(' ');
-			sb.append(target.id);
+			path.add(target);
 			target = target.parent;
 		}
-		return sb.reverse().toString();
+		Collections.reverse(path);
+		return path;
+	}
+
+	private String getPathAsString(List<SwitchNode> path) {
+		StringBuilder sb = new StringBuilder();
+		for (SwitchNode node : path) {
+			sb.append(node.id).append(' ');
+		}
+		return sb.toString();
+	}
+
+	private Route buildRoute(List<SwitchNode> path) {
+		if (path == null) return null;
+		List<NodePortTuple> nodePortTuples = new ArrayList<NodePortTuple>();
+		for (int i = 1; i < path.size(); ++i) {
+			SwitchNode current = path.get(i);
+			Edge currentEdge = current.edgeFrom;
+			nodePortTuples.add(new NodePortTuple(currentEdge.sourceID, currentEdge.srcPort));
+			nodePortTuples.add(new NodePortTuple(currentEdge.targetID, currentEdge.dstPort));
+		}
+		RouteId routeID = new RouteId(path.get(0).id, path.get(path.size() - 1).id);
+		return new Route(routeID, nodePortTuples);
 	}
 
 	private Route dijkstra(String sourceIP, String destinationIP) {
-		Route route = null;
+		List<SwitchNode> path = null;
 		PriorityQueue<SwitchNode> frontier = new PriorityQueue<SwitchNode>();
 		Set<Long> explored = new HashSet<Long>();
 		SwitchNode root = switchNodes.get(deviceSwitches.get(sourceIP));
@@ -308,7 +333,8 @@ public class MyRouting implements IOFMessageListener, IFloodlightModule {
 				while (deviceIPIterator.hasNext()) {
 					String deviceIP = deviceIPIterator.next();
 					if (destinationIP.equals(deviceIP)) {
-						System.out.println("route: " + getPath(current));
+						path = getPath(current);
+						System.out.println("route: " + getPathAsString(path));
 						break;
 					}
 				}
@@ -323,10 +349,13 @@ public class MyRouting implements IOFMessageListener, IFloodlightModule {
 					frontier.remove(target);
 					target.cost = newCost;
 					target.parent = current;
+					target.edgeFrom = edge;
 					frontier.offer(target);
 				}
 			}
 		}
+		Route route = buildRoute(path);
+		System.out.println(route);
 		for (long switchID : switchNodes.keySet()) {
 			switchNodes.get(switchID).reset();
 		}
