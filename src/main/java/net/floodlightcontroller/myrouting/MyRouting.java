@@ -181,6 +181,12 @@ public class MyRouting implements IOFMessageListener, IFloodlightModule {
 		return -1;
 	}
 
+	private void addDeviceToPath(FloodlightContext cntx, String key, List<NodePortTuple> path, int index) {
+		SwitchPort[] attachmentPoints = IDeviceService.fcStore.get(cntx, key).getAttachmentPoints();
+		NodePortTuple device = new NodePortTuple(attachmentPoints[0].getSwitchDPID(), attachmentPoints[0].getPort());
+		path.add(index, device);
+	}
+
 	@Override
 	public Command receive(IOFSwitch sw, OFMessage msg, FloodlightContext cntx) {
 		if (!printedTopo) {
@@ -216,12 +222,15 @@ public class MyRouting implements IOFMessageListener, IFloodlightModule {
 		OFMatch match = new OFMatch();
 		match.loadFromPacket(pi.getPacketData(), pi.getInPort());
 		String sourceIP = IPv4.fromIPv4Address(match.getNetworkSource());
-		String destinationIP = IPv4.fromIPv4Address(match.getNetworkDestination());			
+		String destinationIP = IPv4.fromIPv4Address(match.getNetworkDestination());
 		System.out.println("srcIP: " + sourceIP);
 		System.out.println("dstIP: " + destinationIP);
 		Route route = dijkstra(sourceIP, destinationIP);
 		if (route != null) {
-			installRoute(route.getPath(), match);
+			List<NodePortTuple> path = route.getPath();
+			addDeviceToPath(cntx, IDeviceService.CONTEXT_SRC_DEVICE, path, 0);
+			addDeviceToPath(cntx, IDeviceService.CONTEXT_DST_DEVICE, path, path.size());
+			installRoutes(path, match);
 		} else {
 			System.out.println("route: No route found!");
 		}
@@ -355,7 +364,6 @@ public class MyRouting implements IOFMessageListener, IFloodlightModule {
 			}
 		}
 		Route route = buildRoute(path);
-		System.out.println(route);
 		for (long switchID : switchNodes.keySet()) {
 			switchNodes.get(switchID).reset();
 		}
@@ -363,35 +371,41 @@ public class MyRouting implements IOFMessageListener, IFloodlightModule {
 	}
 
 	// Install routing rules on switches. 
-	private void installRoute(List<NodePortTuple> path, OFMatch match) {
-
-		OFMatch m = new OFMatch();
-
-		m.setDataLayerType(Ethernet.TYPE_IPv4)
+	private void installRoutes(List<NodePortTuple> path, OFMatch match) {
+		OFMatch sourceToDestinationMatch = new OFMatch();
+		OFMatch destinationToSourceMatch = new OFMatch();
+		sourceToDestinationMatch.setDataLayerType(Ethernet.TYPE_IPv4)
 				.setNetworkSource(match.getNetworkSource())
 				.setNetworkDestination(match.getNetworkDestination());
-
+		destinationToSourceMatch.setDataLayerType(Ethernet.TYPE_IPv4)
+				.setNetworkSource(match.getNetworkDestination())
+				.setNetworkDestination(match.getNetworkSource());
 		for (int i = 0; i <= path.size() - 1; i += 2) {
-			short inport = path.get(i).getPortId();
-			m.setInputPort(inport);
-			List<OFAction> actions = new ArrayList<OFAction>();
-			OFActionOutput outport = new OFActionOutput(path.get(i + 1)
-					.getPortId());
-			actions.add(outport);
-
-			OFFlowMod mod = (OFFlowMod) floodlightProvider
-					.getOFMessageFactory().getMessage(OFType.FLOW_MOD);
-			mod.setCommand(OFFlowMod.OFPFC_ADD)
-					.setIdleTimeout((short) 0)
-					.setHardTimeout((short) 0)
-					.setMatch(m)
-					.setPriority((short) 105)
-					.setActions(actions)
-					.setLength(
-							(short) (OFFlowMod.MINIMUM_LENGTH + OFActionOutput.MINIMUM_LENGTH));
-			flowPusher.addFlow("routeFlow" + uniqueFlow, mod,
-					HexString.toHexString(path.get(i).getNodeId()));
-			uniqueFlow++;
+			installRoute(path, sourceToDestinationMatch, i, 1);
 		}
+		// install another path from the destination back to the source to deliver the acknowledgements
+		for (int i = path.size() - 1; i > 0; i -= 2) {
+			installRoute(path, destinationToSourceMatch, i, -1);
+		}
+	}
+
+	private void installRoute(List<NodePortTuple> path, OFMatch match, int i, int next) {
+		short inport = path.get(i).getPortId();
+		match.setInputPort(inport);
+		List<OFAction> actions = new ArrayList<OFAction>();
+		OFActionOutput outport = new OFActionOutput(path.get(i + next).getPortId());
+		actions.add(outport);
+		OFFlowMod mod = (OFFlowMod) floodlightProvider.getOFMessageFactory().getMessage(OFType.FLOW_MOD);
+		short length = (short) (OFFlowMod.MINIMUM_LENGTH + OFActionOutput.MINIMUM_LENGTH);
+		mod.setCommand(OFFlowMod.OFPFC_ADD)
+				.setIdleTimeout((short) 0)
+				.setHardTimeout((short) 0)
+				.setMatch(match)
+				.setPriority((short) 105)
+				.setActions(actions)
+				.setLength(length);
+		flowPusher.addFlow("routeFlow" + uniqueFlow, mod,
+				HexString.toHexString(path.get(i).getNodeId()));
+		uniqueFlow++;
 	}
 }
